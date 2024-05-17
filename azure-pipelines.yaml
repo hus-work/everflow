@@ -1,0 +1,93 @@
+trigger:
+- main
+
+parameters:
+- name: dockerRegistryServiceConnection
+  type: string
+  default: 'dockerRegistryConnection'
+- name: dockerRepository
+  type: string
+  default: 'docker-repo-name'
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+- stage: Build
+  displayName: 'Build stage'
+  jobs:
+  - job: Build
+    displayName: 'Build job'
+    steps:
+    - checkout: git://github.com/dotnet/dotnet-docker
+      path: 'dotnet-docker'
+      fetchDepth: '1'
+    - task: UseDotNet@2
+      inputs:
+        packageType: 'sdk'
+        version: '3.x'
+    - script: |
+        dotnet restore dotnet-docker/samples/aspnetapp
+        dotnet build --configuration Release dotnet-docker/samples/aspnetapp
+    - task: Docker@2
+      inputs:
+        containerRegistry: $(dockerRegistryServiceConnection)
+        repository: $(dockerRepository)
+        command: 'build'
+        Dockerfile: 'dotnet-docker/samples/aspnetapp/Dockerfile'
+        tags: |
+          $(Build.BuildId)
+
+
+- stage: Test
+  displayName: 'Test stage'
+  jobs:
+  - job: Test
+    displayName: 'Test job'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - script: |
+        # Run any necessary tests
+        # Example: dotnet test
+    - task: Docker@2
+      inputs:
+        containerRegistry: 'dockerRegistryServiceConnection'
+        repository: 'docker-repo-name'
+        command: 'push'
+        tags: |
+          $(Build.BuildId)
+
+- stage: Deploy
+  displayName: 'Deploy stage'
+  dependsOn: Test
+  jobs:
+  - job: Deploy
+    displayName: 'Deploy job'
+    steps:
+    - script: |
+        # Any pre-deployment validation
+        # Example: Security checks
+    - task: Docker@2
+      inputs:
+        containerRegistry: $(dockerRegistryServiceConnection)
+        repository: $(dockerRepository)
+        command: 'push'
+        tags: |
+          $(Build.BuildId)
+    - task: DownloadSecureFile@1
+      inputs:
+        secureFile: 'terraform_credentials'
+      displayName: 'Download Terraform credentials'
+    - task: PowerShell@2
+      inputs:
+        targetType: 'inline'
+        script: |
+          $env:ARM_CLIENT_ID = "$(ARM_CLIENT_ID)"
+          $env:ARM_CLIENT_SECRET = "$(ARM_CLIENT_SECRET)"
+          $env:ARM_SUBSCRIPTION_ID = "$(ARM_SUBSCRIPTION_ID)"
+          $env:ARM_TENANT_ID = "$(ARM_TENANT_ID)"
+          terraform init
+          terraform plan -out=tfplan
+          terraform apply -input=false tfplan
+    # Additional steps for Terraform deployment
