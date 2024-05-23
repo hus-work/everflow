@@ -2,92 +2,78 @@ trigger:
 - main
 
 parameters:
-- name: dockerRegistryServiceConnection
+- name: environment
   type: string
-  default: 'dockerRegistryConnection'
-- name: dockerRepository
-  type: string
-  default: 'docker-repo-name'
+  default: 'test'
+  values:
+  - test
+  - prod
 
 pool:
   vmImage: 'ubuntu-latest'
 
 stages:
-- stage: Build
-  displayName: 'Build stage'
+- stage: Plan
+  displayName: 'Terraform Plan'
   jobs:
-  - job: Build
-    displayName: 'Build job'
+  - job: TerraformPlan
+    displayName: 'Terraform Plan Job'
     steps:
-    - checkout: git://github.com/dotnet/dotnet-docker
-      path: 'dotnet-docker'
-      fetchDepth: '1'
-    - task: UseDotNet@2
-      inputs:
-        packageType: 'sdk'
-        version: '3.x'
-    - script: |
-        dotnet restore dotnet-docker/samples/aspnetapp
-        dotnet build --configuration Release dotnet-docker/samples/aspnetapp
-    - task: Docker@2
-      inputs:
-        containerRegistry: $(dockerRegistryServiceConnection)
-        repository: $(dockerRepository)
-        command: 'build'
-        Dockerfile: 'dotnet-docker/samples/aspnetapp/Dockerfile'
-        tags: |
-          $(Build.BuildId)
-
-
-- stage: Test
-  displayName: 'Test stage'
-  jobs:
-  - job: Test
-    displayName: 'Test job'
-    pool:
-      vmImage: 'ubuntu-latest'
-    steps:
-    - script: |
-        # Run any necessary tests
-        # Example: dotnet test
-    - task: Docker@2
-      inputs:
-        containerRegistry: 'dockerRegistryServiceConnection'
-        repository: 'docker-repo-name'
-        command: 'push'
-        tags: |
-          $(Build.BuildId)
-
-- stage: Deploy
-  displayName: 'Deploy stage'
-  dependsOn: Test
-  jobs:
-  - job: Deploy
-    displayName: 'Deploy job'
-    steps:
-    - script: |
-        # Any pre-deployment validation
-        # Example: Security checks
-    - task: Docker@2
-      inputs:
-        containerRegistry: $(dockerRegistryServiceConnection)
-        repository: $(dockerRepository)
-        command: 'push'
-        tags: |
-          $(Build.BuildId)
+    - checkout: self
     - task: DownloadSecureFile@1
       inputs:
         secureFile: 'terraform_credentials'
       displayName: 'Download Terraform credentials'
-    - task: PowerShell@2
+    - script: |
+        # Set environment variables for Terraform
+        $env:ARM_CLIENT_ID = "$(ARM_CLIENT_ID)"
+        $env:ARM_CLIENT_SECRET = "$(ARM_CLIENT_SECRET)"
+        $env:ARM_SUBSCRIPTION_ID = "$(ARM_SUBSCRIPTION_ID)"
+        $env:ARM_TENANT_ID = "$(ARM_TENANT_ID)"
+
+        # Initialize Terraform
+        terraform init
+
+        # Plan Terraform deployment
+        terraform plan -var-file=$(parameters.environment).tfvars -out=tfplan
+      displayName: 'Run Terraform Plan'
+    artifacts: 
+      files: tfplan
+      name: tfplan
+      type: filePath
+
+- stage: Validate
+  displayName: 'Manual Validation'
+  dependsOn: Plan
+  jobs:
+  - job: ManualValidation
+    displayName: 'Manual Validation Job'
+    steps:
+    - task: ManualValidation@0
       inputs:
-        targetType: 'inline'
-        script: |
-          $env:ARM_CLIENT_ID = "$(ARM_CLIENT_ID)"
-          $env:ARM_CLIENT_SECRET = "$(ARM_CLIENT_SECRET)"
-          $env:ARM_SUBSCRIPTION_ID = "$(ARM_SUBSCRIPTION_ID)"
-          $env:ARM_TENANT_ID = "$(ARM_TENANT_ID)"
-          terraform init
-          terraform plan -out=tfplan
-          terraform apply -input=false tfplan
-    # Additional steps for Terraform deployment
+        instructions: 'Please validate the Terraform plan before applying.'
+
+- stage: Apply
+  displayName: 'Terraform Apply'
+  dependsOn: Validate
+  jobs:
+  - job: TerraformApply
+    displayName: 'Terraform Apply Job'
+    steps:
+    - checkout: self
+    - download: current
+      artifact: tfplan
+    - task: DownloadSecureFile@1
+      inputs:
+        secureFile: 'terraform_credentials'
+      displayName: 'Download Terraform credentials'
+    - script: |
+        # Set environment variables for Terraform
+        $env:ARM_CLIENT_ID = "$(ARM_CLIENT_ID)"
+        $env:ARM_CLIENT_SECRET = "$(ARM_CLIENT_SECRET)"
+        $env:ARM_SUBSCRIPTION_ID = "$(ARM_SUBSCRIPTION_ID)"
+        $env:ARM_TENANT_ID = "$(ARM_TENANT_ID)"
+
+        # Apply Terraform plan
+        terraform apply -input=false tfplan
+      displayName: 'Run Terraform Apply'
