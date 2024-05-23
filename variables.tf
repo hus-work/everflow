@@ -38,3 +38,7 @@ variable "app_service_name" {
   type        = string
   default     = "myAppServiceName"
 }
+
+variable "docker_image_tag" {
+  default = "latest"
+}

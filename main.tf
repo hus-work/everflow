@@ -6,17 +6,35 @@ provider "github" {
   token = var.github_token
 }
 
+provider "docker" {
+  host = "unix:///var/run/docker.sock"
+}
+
 # Fetch .NET code from GitHub
-resource "null_resource" "fetch_code" {
+resource "local_file" "aspnetapp_code" {
+  content  = templatefile("${path.module}/scripts/fetch_code.sh", { 
+    github_repo = var.github_repo,
+    github_branch = var.github_branch 
+  })
+  filename = "${path.module}/scripts/fetch_code.sh"
+}
+
+resource "null_resource" "execute_fetch_code" {
+  depends_on = [local_file.aspnetapp_code]
+
   provisioner "local-exec" {
-    command = <<EOT
-      git clone --depth 1 --branch ${var.github_branch} https://github.com/${var.github_repo}.git
-      cd ${basename(path.module)}/samples/aspnetapp
-      dotnet restore
-      dotnet build --configuration Release
-      docker build -t ${azurerm_container_registry.acr.login_server}/${var.acr_name}/aspnetapp:latest .
-    EOT
+    command = "bash ${path.module}/scripts/fetch_code.sh"
   }
+}
+
+# Build Docker Image
+resource "docker_image" "aspnetapp" {
+  name         = "${azurerm_container_registry.acr.login_server}/${var.acr_name}/aspnetapp:${var.docker_image_tag}"
+  build {
+    context    = "${path.module}/samples/aspnetapp"
+    dockerfile = "${path.module}/samples/aspnetapp/Dockerfile"
+  }
+  depends_on = [null_resource.execute_fetch_code]
 }
 
 # Create Azure Container Registry
@@ -30,11 +48,12 @@ resource "azurerm_container_registry" "acr" {
 
 # Store Docker image in Azure Container Registry
 resource "null_resource" "docker_push" {
-  depends_on = [azurerm_container_registry.acr, null_resource.fetch_code]
+  depends_on = [docker_image.aspnetapp, azurerm_container_registry.acr]
+
   provisioner "local-exec" {
     command = <<EOT
       az acr login --name ${azurerm_container_registry.acr.name}
-      docker push ${azurerm_container_registry.acr.login_server}/${var.acr_name}/aspnetapp:latest
+      docker push ${docker_image.aspnetapp.name}
     EOT
   }
 }
@@ -58,7 +77,7 @@ resource "azurerm_app_service" "app" {
   app_service_plan_id = azurerm_app_service_plan.asp.id
 
   site_config {
-    linux_fx_version = "DOCKER|${azurerm_container_registry.acr.login_server}/${var.acr_name}/aspnetapp:latest"
+    linux_fx_version = "DOCKER|${azurerm_container_registry.acr.login_server}/${var.acr_name}/aspnetapp:${var.docker_image_tag}"
   }
 }
 
